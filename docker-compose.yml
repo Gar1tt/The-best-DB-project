@@ -1,0 +1,19 @@
+services:
+  db:
+    build:
+      context: https://github.com/MariaDB/mariadb-docker.git#master:13.1
+    image: mariadb:13.1-local
+    container_name: hospital-db
+
+    ports:
+      - "127.0.0.1:3306:3306"
+
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+      MARIADB_DATABASE: hospital
+
+    volumes:
+      - hospital-data:/var/lib/mysql
+
+volumes:
+  hospital-data:
