@@ -4,6 +4,7 @@ services:
       context: https://github.com/MariaDB/mariadb-docker.git#master:13.1
     image: mariadb:13.1-local
     container_name: hospital-db
+    command: ["--plugin-load-add=auth_ed25519"]
 
     ports:
       - "127.0.0.1:3306:3306"
