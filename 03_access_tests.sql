@@ -16,6 +16,10 @@
 --   reception_test  Reception!Test1
 --   admin_test      Admin!Test1
 --
+-- Docker: connect to host 127.0.0.1, port 3306. CURRENT_USER() then shows
+-- the '%' account (for example dr_test@%) instead of dr_test@localhost.
+-- The privileges are identical for both accounts.
+--
 -- The tests change a few rows (notes, appointment status, a phone
 -- number, one new appointment). It is test data, so this is fine.
 -- ============================================================
