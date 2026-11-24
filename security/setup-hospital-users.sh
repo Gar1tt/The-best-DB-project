@@ -5,6 +5,13 @@ set -euo pipefail
 # Configures authentication without changing the existing roles.
 
 CONTAINER="hospital-db"
+# Clear password variables when the script finishes or fails.
+cleanup() {
+    unset ROOT_PASSWORD DOCTOR_PASSWORD NURSE_PASSWORD
+    unset RECEPTION_PASSWORD ADMIN_PASSWORD
+}
+
+trap cleanup EXIT
 
 # Check that the database container is running.
 if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -qx true; then
@@ -49,8 +56,10 @@ ADMIN_PASSWORD=$(ask_password "Admin")
         printf "ALTER USER 'admin_test'@'%s' IDENTIFIED VIA ed25519 USING PASSWORD('%s') REQUIRE SSL;\n" "$HOST" "$ADMIN_PASSWORD"
     done
 } | docker exec -i -e MYSQL_PWD="$ROOT_PASSWORD" "$CONTAINER" \
-    mariadb --batch -u root
-
-unset ROOT_PASSWORD DOCTOR_PASSWORD NURSE_PASSWORD RECEPTION_PASSWORD ADMIN_PASSWORD
+    mariadb --batch -u root || {
+        echo "ERROR: Hospital security configuration failed." >&2
+        echo "Check the root password, ED25519 plugin and existing accounts." >&2
+        exit 1
+    }
 
 echo "ED25519 authentication and required TLS configured successfully!"
