@@ -1,5 +1,16 @@
 -- ============================================================
--- Hospital database: roles, views, users and privileges (MariaDB)
+-- Hospital database: roles, views, users and privileges (MariaDB 13.1+)
+--
+-- ACCESS MODEL: "grant broadly, then DENY the exceptions".
+--   * hospital_staff  gets SELECT on the whole schema, and is DENIED the
+--                     sensitive tables.
+--   * doctor, nurse and receptionist inherit hospital_staff and add the
+--     few write privileges their job needs.
+--   * hospital_admin  gets ALL PRIVILEGES on the schema, and is DENIED
+--                     tampering with the audit log.
+--
+-- A DENY always beats a GRANT, in any order and through any role, and it
+-- can only be removed with REVOKE DENY. DENY needs MariaDB 13.1 or newer.
 --
 -- HOW TO RUN: connected as root, load hospital_full.sql first,
 -- then run this file ONCE (F9 in HeidiSQL).
@@ -21,6 +32,7 @@ USE hospital;
 
 -- ------------------------------------------------------------
 -- 0. Clean start (users first, then roles, then views)
+--    Dropping a role also removes its grants and its denies.
 -- ------------------------------------------------------------
 DROP USER IF EXISTS 'dr_test'@'localhost',        'dr_test'@'%';
 DROP USER IF EXISTS 'nurse_test'@'localhost',     'nurse_test'@'%';
@@ -31,6 +43,7 @@ DROP ROLE IF EXISTS doctor;
 DROP ROLE IF EXISTS nurse;
 DROP ROLE IF EXISTS receptionist;
 DROP ROLE IF EXISTS hospital_admin;
+DROP ROLE IF EXISTS hospital_staff;
 
 DROP VIEW IF EXISTS staff_directory;
 DROP VIEW IF EXISTS patient_contact;
@@ -39,6 +52,8 @@ DROP VIEW IF EXISTS patient_contact;
 -- 1. Views (expose only the safe columns)
 --    A view runs with the privileges of its creator (root), so
 --    users of the view need no rights on the underlying table.
+--    This is how a role that is DENIED a table can still read
+--    the harmless columns of it.
 -- ------------------------------------------------------------
 CREATE VIEW staff_directory AS
   SELECT staff_id, first_name, last_name, role_id, dept_id
@@ -50,50 +65,65 @@ CREATE VIEW patient_contact AS
 
 -- ------------------------------------------------------------
 -- 2. Create the roles
+--    hospital_staff is the shared base role. It is never given
+--    to a user directly, only to the three job roles.
 -- ------------------------------------------------------------
+CREATE ROLE hospital_staff;
 CREATE ROLE doctor;
 CREATE ROLE nurse;
 CREATE ROLE receptionist;
 CREATE ROLE hospital_admin;
 
 -- ------------------------------------------------------------
--- 3. DOCTOR
---    read patients, read/write medical records, read appointments
+-- 3. HOSPITAL_STAFF (base role): read everything in the schema
+--    EXCEPT the four tables that only the admin may touch, and
+--    the staff table (staff read the staff_directory view instead).
+--
+--    One broad GRANT plus five DENYs replaces the old list of
+--    one GRANT per table per role.
 -- ------------------------------------------------------------
-GRANT SELECT ON hospital.patients TO doctor;
-GRANT SELECT, INSERT, UPDATE ON hospital.medical_records TO doctor;
-GRANT SELECT ON hospital.appointments TO doctor;
+GRANT SELECT ON hospital.* TO hospital_staff;
+
+DENY ALL PRIVILEGES ON hospital.accounts         TO hospital_staff;
+DENY ALL PRIVILEGES ON hospital.audit_log        TO hospital_staff;
+DENY ALL PRIVILEGES ON hospital.permissions      TO hospital_staff;
+DENY ALL PRIVILEGES ON hospital.role_permissions TO hospital_staff;
+DENY ALL PRIVILEGES ON hospital.staff            TO hospital_staff;
 
 -- ------------------------------------------------------------
--- 4. NURSE
---    read patients, read medical records, read/write appointments
+-- 4. DOCTOR = hospital_staff + write medical records
 -- ------------------------------------------------------------
-GRANT SELECT ON hospital.patients TO nurse;
-GRANT SELECT ON hospital.medical_records TO nurse;
-GRANT SELECT, INSERT, UPDATE ON hospital.appointments TO nurse;
+GRANT hospital_staff TO doctor;
+GRANT INSERT, UPDATE ON hospital.medical_records TO doctor;
 
 -- ------------------------------------------------------------
--- 5. RECEPTIONIST
---    read/write patient contact data through the view
---    (insurance_no is not in the view), read/write appointments,
---    NO access to the patients table or to medical records
+-- 5. NURSE = hospital_staff + write appointments
 -- ------------------------------------------------------------
-GRANT SELECT, INSERT, UPDATE ON hospital.patient_contact TO receptionist;
-GRANT SELECT, INSERT, UPDATE ON hospital.appointments TO receptionist;
+GRANT hospital_staff TO nurse;
+GRANT INSERT, UPDATE ON hospital.appointments TO nurse;
 
 -- ------------------------------------------------------------
--- 6. Shared read access for doctor, nurse and receptionist:
---    lookup tables and the staff directory view.
---    The staff table itself, accounts and audit_log stay hidden.
+-- 6. RECEPTIONIST = hospital_staff + write appointments
+--    + write patient contact data through the view,
+--    and DENIED the patients table and the medical records.
+--    (insurance_no is only in the patients table, not in the view.)
 -- ------------------------------------------------------------
-GRANT SELECT ON hospital.departments TO doctor, nurse, receptionist;
-GRANT SELECT ON hospital.roles TO doctor, nurse, receptionist;
-GRANT SELECT ON hospital.staff_directory TO doctor, nurse, receptionist;
+GRANT hospital_staff TO receptionist;
+GRANT INSERT, UPDATE ON hospital.appointments    TO receptionist;
+GRANT INSERT, UPDATE ON hospital.patient_contact TO receptionist;
+
+DENY ALL PRIVILEGES ON hospital.patients        TO receptionist;
+DENY ALL PRIVILEGES ON hospital.medical_records TO receptionist;
 
 -- ------------------------------------------------------------
--- 7. ADMIN: everything in the hospital database
+-- 7. ADMIN: everything in the hospital database,
+--    EXCEPT changing or removing the audit log.
+--    The admin can read the log and new entries can be added,
+--    but existing entries cannot be edited, deleted or dropped.
 -- ------------------------------------------------------------
 GRANT ALL PRIVILEGES ON hospital.* TO hospital_admin;
+
+DENY UPDATE, DELETE, DROP, ALTER, TRIGGER ON hospital.audit_log TO hospital_admin;
 
 -- ------------------------------------------------------------
 -- 8. Test users (one per role) and role assignment
@@ -123,8 +153,22 @@ SET DEFAULT ROLE hospital_admin FOR 'admin_test'@'localhost';
 SET DEFAULT ROLE hospital_admin FOR 'admin_test'@'%';
 
 -- ------------------------------------------------------------
--- 9. Show the result (take screenshots for the report)
+-- 8b. Reload the privilege tables
+--     Makes the server rebuild every role from what is stored, so
+--     all denies are applied to all roles that inherit them.
+--     Run this again after ANY later GRANT, DENY or REVOKE DENY.
+--     (Tested on MariaDB 13.1.1 and 13.1.2: a deny inherited through
+--     a role is not always applied until the privileges are reloaded.
+--     See section J of 03_access_tests.sql.)
 -- ------------------------------------------------------------
+FLUSH PRIVILEGES;
+
+-- ------------------------------------------------------------
+-- 9. Show the result (take screenshots for the report)
+--    The DENY lines appear next to the GRANT lines. Only an
+--    account that can read the mysql database (root) sees them.
+-- ------------------------------------------------------------
+SHOW GRANTS FOR hospital_staff;
 SHOW GRANTS FOR doctor;
 SHOW GRANTS FOR nurse;
 SHOW GRANTS FOR receptionist;
@@ -132,7 +176,8 @@ SHOW GRANTS FOR hospital_admin;
 SHOW GRANTS FOR 'reception_test'@'localhost';
 
 -- ------------------------------------------------------------
--- 10. REVOKE demo (optional, run these two lines separately)
+-- 10. Removing a deny (optional, run these two lines separately)
+--     A later GRANT does NOT cancel a DENY. Only REVOKE DENY does.
 -- ------------------------------------------------------------
--- REVOKE UPDATE ON hospital.medical_records FROM doctor;
--- GRANT  UPDATE ON hospital.medical_records TO doctor;   -- restore
+-- REVOKE DENY ALL PRIVILEGES ON hospital.medical_records FROM receptionist;
+-- DENY        ALL PRIVILEGES ON hospital.medical_records TO receptionist;   -- restore
