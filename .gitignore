@@ -4,3 +4,6 @@ certs/
 .vscode/
 .venv/
 __pycache__/
+
+# Local hospital test credentials
+security/demo-credentials.local
