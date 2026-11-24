@@ -1,0 +1,7 @@
+services:
+  db:
+    command:
+      - --plugin-load-add=auth_ed25519
+      - --ssl-ca=/var/lib/mysql/hospital-tls/ca.pem
+      - --ssl-cert=/var/lib/mysql/hospital-tls/server.pem
+      - --ssl-key=/var/lib/mysql/hospital-tls/server.key
