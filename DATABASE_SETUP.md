@@ -10,9 +10,10 @@ This document covers the database structure, the generated test data, and the ro
 | File | Purpose |
 |---|---|
 | `hospital_full.sql` | Full export of the database: schema, views and data |
-| `02_roles_grants.sql` | Roles, views, test users and `GRANT` statements |
-| `03_access_tests.sql` | Allowed and denied queries used to test each role |
-| `screenshots/` | Evidence of the test results |
+| `database/02_roles_grants.sql` | Roles, views, test users, and the `GRANT` and `DENY` statements |
+| `database/03_access_tests.sql` | Allowed and denied queries used to test each role (sections A to D), and attacks against the `DENY` rules (sections F to J) |
+| `database/screenshots/` | Evidence of the test results for sections A to D |
+| `security/` | ED25519 and TLS setup for the test users, with its own tests and `README.md` |
 | `DATABASE_SETUP.md` | This document |
 
 ## 1. Environment
@@ -200,13 +201,21 @@ Because of foreign keys, data must be loaded in this order:
 
 ## 5. Access control implementation
 
-MariaDB has **no `DENY` statement**. Access is denied by not granting a privilege (everything is forbidden by default), and `REVOKE` removes a privilege that was granted earlier. This project therefore uses three techniques:
+MariaDB 13.1 added the [`DENY`](https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/deny) statement, and this project uses it. The model is "grant broadly, then deny the exceptions": a role gets `SELECT` on the whole `hospital` schema, and the tables it must not touch are denied by name. Three rules make this work:
 
-1. **Withholding grants**: a role with no privilege on a table cannot even see it in the table list.
-2. **Views**: a view exposes only safe columns, and the role is granted the view instead of the table.
-3. **Roles**: privileges are granted to roles, and roles are assigned to users.
+- A deny always beats a grant, in any order.
+- A deny on a role applies to every role and user that holds it.
+- Only `REVOKE DENY` removes a deny. A later `GRANT` does not.
 
-The `roles`, `permissions` and `role_permissions` tables describe the access model in the data. The actual enforcement is done by MariaDB with `CREATE ROLE`, `GRANT` and `CREATE USER` in `02_roles_grants.sql`.
+The project uses three techniques:
+
+1. **Roles**: privileges are granted to roles, and roles are assigned to users. The base role `hospital_staff` holds what doctor, nurse and receptionist have in common, and those three roles inherit it.
+2. **`DENY`**: the base role is denied the sensitive tables, the receptionist is also denied `patients` and `medical_records`, and the admin is denied changing the audit log. A denied table is refused with error 1142 and does not appear in `SHOW TABLES`.
+3. **Views**: a view exposes only safe columns. A role that is denied a table can still read the view on it.
+
+The `roles`, `permissions` and `role_permissions` tables describe the access model in the data. The actual enforcement is done by MariaDB with `CREATE ROLE`, `GRANT`, `DENY` and `CREATE USER` in `database/02_roles_grants.sql`.
+
+An earlier version of this document said that MariaDB has no `DENY` statement. That was true before version 13.1, and the first version of the grants used one `GRANT` per table per role instead.
 
 ### 5.1 Views
 
@@ -215,21 +224,40 @@ The `roles`, `permissions` and `role_permissions` tables describe the access mod
 | `staff_directory` | `staff` | staff_id, first_name, last_name, role_id, dept_id | email, hire_date |
 | `patient_contact` | `patients` | patient_id, first_name, last_name, birth_date, gender, phone, address | insurance_no |
 
-A view runs with the privileges of its creator (root), so users of the view need no rights on the underlying table. This makes the view definition the security boundary: it must list only safe columns.
+A view runs with the privileges of its creator (root), so users of the view need no rights on the underlying table. This also holds when the role is denied the table, because the deny applies to the role and not to root. This makes the view definition the security boundary: it must list only safe columns.
 
-### 5.2 Privileges per MariaDB role
+### 5.2 Roles, grants and denies
+
+What `database/02_roles_grants.sql` defines:
+
+| Role | Granted | Denied |
+|---|---|---|
+| `hospital_staff` (base role, not given to users directly) | `SELECT` on `hospital.*` | All privileges on `accounts`, `audit_log`, `permissions`, `role_permissions` and `staff` |
+| `doctor` | `hospital_staff`; `INSERT, UPDATE` on `medical_records` | Inherited from `hospital_staff` |
+| `nurse` | `hospital_staff`; `INSERT, UPDATE` on `appointments` | Inherited from `hospital_staff` |
+| `receptionist` | `hospital_staff`; `INSERT, UPDATE` on `appointments` and on the view `patient_contact` | Inherited from `hospital_staff`, plus all privileges on `patients` and `medical_records` |
+| `hospital_admin` | `ALL PRIVILEGES` on `hospital.*` | `UPDATE, DELETE, DROP, ALTER, TRIGGER` on `audit_log` |
+
+The resulting privileges per object:
 
 | Object | doctor | nurse | receptionist | hospital_admin |
 |---|---|---|---|---|
-| `patients` | SELECT | SELECT | none | ALL |
-| `patient_contact` (view) | none | none | SELECT, INSERT, UPDATE | ALL |
-| `medical_records` | SELECT, INSERT, UPDATE | SELECT | none | ALL |
+| `patients` | SELECT | SELECT | denied | ALL |
+| `patient_contact` (view) | SELECT | SELECT | SELECT, INSERT, UPDATE | ALL |
+| `medical_records` | SELECT, INSERT, UPDATE | SELECT | denied | ALL |
 | `appointments` | SELECT | SELECT, INSERT, UPDATE | SELECT, INSERT, UPDATE | ALL |
-| `staff` | none | none | none | ALL |
+| `staff` | denied | denied | denied | ALL |
 | `staff_directory` (view) | SELECT | SELECT | SELECT | ALL |
 | `departments`, `roles` | SELECT | SELECT | SELECT | ALL |
-| `accounts`, `audit_log` | none | none | none | ALL |
-| `permissions`, `role_permissions` | none | none | none | ALL |
+| `accounts` | denied | denied | denied | ALL |
+| `audit_log` | denied | denied | denied | ALL except UPDATE, DELETE, DROP, ALTER, TRIGGER |
+| `permissions`, `role_permissions` | denied | denied | denied | ALL |
+
+Compared with the first version of the grants, two things changed: doctors and nurses can now also read `patient_contact` (a subset of the `patients` table, which they could already read), and the admin can no longer change, delete or drop the audit log.
+
+As root, `SHOW GRANTS FOR receptionist;` lists the `DENY` lines next to the `GRANT` lines. The denies are only shown to an account that can read the `mysql` database, so the four test users do not see them in their own `SHOW GRANTS`.
+
+The script ends with `FLUSH PRIVILEGES`. Run `FLUSH PRIVILEGES` again after any later `GRANT`, `DENY` or `REVOKE DENY` (see section 9).
 
 ### 5.3 Test users (demo passwords only)
 
@@ -240,11 +268,15 @@ A view runs with the privileges of its creator (root), so users of the view need
 | `reception_test`@localhost | `Reception!Test1` | receptionist |
 | `admin_test`@localhost | `Admin!Test1` | hospital_admin |
 
-Each user has the role set as the default role, so it is active at login. These credentials are fake and for testing only. Do not use real passwords in the repository.
+Each user exists for the hosts `localhost` and `%`, and has the role set as the default role, so it is active at login. These credentials are fake and for testing only. Do not use real passwords in the repository.
+
+These are the passwords that `database/02_roles_grants.sql` sets. They are valid only until `security/setup-hospital-users.sh` is run. That script switches all four users to ED25519 authentication with new passwords and requires TLS for them; see `security/README.md`.
 
 ## 6. Testing
 
-Each user was tested in a separate HeidiSQL session (host `127.0.0.1`). The queries are in `03_access_tests.sql`. A denied query that gets denied counts as a pass. Screenshots are in `screenshots/`.
+Each user was tested in a separate HeidiSQL session (host `127.0.0.1`). The queries are in `database/03_access_tests.sql`. A denied query that gets denied counts as a pass. Screenshots are in `database/screenshots/`.
+
+The screenshots for 6.1 to 6.5 were taken with the first, `GRANT`-only version of the grants. After the change to `DENY`, all 41 queries of sections A to D were run again on MariaDB 13.1.1 with the `mariadb` command-line client. Each gave the same result and the same error code as in the tables below.
 
 ### 6.1 Doctor (`dr_test`)
 
@@ -325,14 +357,33 @@ The eight admin queries were run together; each screenshot shows one result tab,
 - Error 1142 means "command denied for table". Error 1054 means "unknown column", which is what the receptionist gets for `insurance_no` because the view does not contain it.
 - Sidebar comparison: `sidebar_nurse_and_receptionist.png` and `sidebar_admin_and_doctor.png` show which objects each session can see. The receptionist sees the view `patient_contact` but not `patients` or `medical_records`. The doctor and the nurse see no `staff`, `accounts`, `audit_log`, `permissions` or `role_permissions`. The admin sees all 10 tables and both views.
 - The view hides `insurance_no` from everyone who uses it, including the admin: `SELECT insurance_no FROM patient_contact` also fails with error 1054 for `admin_test` (`admin_extra_insurance_no_in_view.png`). The admin reads `insurance_no` from the `patients` table instead (`admin_05_select_patients_allowed.png`).
+- With the `DENY` version of the grants, `SHOW TABLES` for the doctor and the nurse also lists the view `patient_contact`. The sidebar screenshots were taken before that change and do not show it.
+
+### 6.6 Attacks against the DENY rules (sections F to J)
+
+Sections F to J of `database/03_access_tests.sql` were run on MariaDB 13.1.1 and 13.1.2 with the `mariadb` command-line client, with the same results on both. There are no screenshots for them yet.
+
+| Section | Run as | Attack | Result |
+|---|---|---|---|
+| F | root, then `dr_test` | Grant the denied `accounts` table back to the doctor in four ways (to `doctor`, to `hospital_staff`, to the user, and `SELECT ON *.*` to the user), then `FLUSH PRIVILEGES` | `SELECT * FROM accounts` is still denied (1142) |
+| G | `dr_test` | `SET ROLE hospital_admin` | Denied (1959) |
+| G | `dr_test` | `GRANT SELECT ON hospital.accounts TO doctor` | Denied (1142) |
+| G | `dr_test` | `REVOKE DENY ALL PRIVILEGES ON hospital.accounts FROM hospital_staff` | Denied (1142) |
+| G | `dr_test` | `SHOW GRANTS FOR hospital_staff` | Denied (1044) |
+| H | `admin_test` | `SELECT COUNT(*) FROM audit_log` | Allowed |
+| H | `admin_test` | `UPDATE`, `DELETE`, `TRUNCATE`, `DROP TABLE`, `ALTER TABLE`, `RENAME TABLE` and `CREATE TRIGGER` on `audit_log` | Denied (1142) |
+| H | `admin_test` | `DROP DATABASE hospital` | Denied (1044) |
+| H | `admin_test` | `REVOKE DENY UPDATE ON hospital.audit_log FROM hospital_admin` | Denied (1142) |
+| I | root, then `dr_test` | Root creates a new table `hospital.salaries`, then the doctor reads it | Allowed. This is a gap, see section 9 |
+| J | root, then `dr_test` | As F, but with only two of the grants (`accounts` to `doctor`, and `SELECT ON *.*` to the user) and without `FLUSH PRIVILEGES` | Allowed until `FLUSH PRIVILEGES` is run, then denied (1142). This is a gap, see section 9 |
 
 ## 7. Restoring the database
 
-Restoring needs **two files, in this order**. The export does not contain users, roles or grants.
+Restoring needs **two files, in this order**. The export does not contain users, roles, grants or denies.
 
 1. If a `hospital` database already exists, run `DROP DATABASE hospital;` first.
 2. Connected as root, open `hospital_full.sql` and execute it **once** (HeidiSQL: F9).
-3. Open `02_roles_grants.sql` and execute it **once**.
+3. Open `database/02_roles_grants.sql` and execute it **once**.
 4. Check the data:
 
 ```sql
@@ -344,12 +395,13 @@ SELECT COUNT(*) FROM role_permissions; -- 20
 SELECT COUNT(*) FROM staff;            -- 30
 SELECT COUNT(*) FROM accounts;         -- 30
 SELECT COUNT(*) FROM patients;         -- 200
-SELECT COUNT(*) FROM appointments;     -- 500
+SELECT COUNT(*) FROM appointments;     -- 501 (500 generated + 1 inserted by the receptionist test in 6.3)
 SELECT COUNT(*) FROM medical_records;  -- 500
 SELECT COUNT(*) FROM audit_log;        -- 1000
 ```
 
-5. Check the access control with `SHOW GRANTS FOR receptionist;` and the tests in `03_access_tests.sql`.
+5. Check the access control with `SHOW GRANTS FOR receptionist;` (as root, so that the `DENY` lines are shown) and the tests in `database/03_access_tests.sql`.
+6. To switch the test users to ED25519 authentication and required TLS, run `security/setup-hospital-users.sh` afterwards (see `security/README.md`). Running `database/02_roles_grants.sql` again resets the users to the demo passwords, so the setup script must then be run again.
 
 To create a new export, connect as **root** (not as a test user, otherwise the export only contains what that user can see), right-click `hospital` → *Export database as SQL*, with Create for database and tables, Data = Insert, and check that the file contains `CREATE VIEW`.
 
@@ -371,5 +423,9 @@ To create a new export, connect as **root** (not as a test user, otherwise the e
 
 - MariaDB has no row-level security. A receptionist who may update `patient_contact` can update any patient's row. Restricting rows would need an additional view with a `WHERE` condition.
 - A view hides columns but not rows, and it works because it runs with its creator's privileges.
-- The `permissions` and `role_permissions` tables document the model; MariaDB itself does not read them. The privileges in `02_roles_grants.sql` must be kept in line with them by hand.
-- The demo passwords are fake and stored in the script on purpose; a real system would never do this.
+- The `permissions` and `role_permissions` tables document the model; MariaDB itself does not read them. The privileges in `database/02_roles_grants.sql` must be kept in line with them by hand.
+- The demo passwords are fake and stored in the script on purpose; a real system would never do this. `security/setup-hospital-users.sh` replaces them.
+- **New tables are readable by default.** `hospital_staff` has `SELECT` on `hospital.*`, so a table added later can be read by doctors, nurses and receptionists until a `DENY` is added for it (test section I).
+- **A deny can be skipped until the privileges are reloaded.** On MariaDB 13.1.1 and 13.1.2, with a grant on `accounts` to the role `doctor` plus `SELECT ON *.*` to the user, the doctor could read `accounts` until `FLUSH PRIVILEGES` was run (test section J). `database/02_roles_grants.sql` therefore ends with `FLUSH PRIVILEGES`, and it should be run again after every later `GRANT`, `DENY` or `REVOKE DENY`.
+- The admin cannot change or delete existing audit log rows, but can still insert new ones.
+- root is not restricted by these roles and can remove any deny with `REVOKE DENY`.
