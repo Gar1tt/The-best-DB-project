@@ -1,73 +1,18 @@
+# Verification notes
 
-# Security Test Results
+## Current implementation
 
-## ED25519 Authentication
-MariaDB version: 13.1.1
-Docker container: hospital-db
+The revised schema, role SQL, ED25519 account provisioning, local CA, and Python verifier were exercised on a fresh **MariaDB 13.1.2** instance. The database in that run was a native sandbox process, not the Compose container.
 
-### Plugin installation
-ED25519 installation: PASS - Plugin installed and verified as ACTIVE.
+| Check | Observed locally |
+|---|---|
+| ED25519/TLS connection and role | Four expected roles connected over TLS 1.3. |
+| Refused connections | Incorrect credentials, TLS disabled, an unrelated CA, and a hostname mismatch were rejected. |
+| Restricted access | Reception could use the contact view but not access insurance or edit the address; nursing could not read the restricted clinical data or the denied contact column. |
+| App write and audit | Doctor diagnosis, nurse appointment, and receptionist phone updates created attributable audit events. Admin could read them, not modify them. |
 
-### Account authentication
-Created a temporary account using ED25519.
+Use `python3 security/demo.py setup --automated` to verify the Docker sequence on a disposable demo volume. That mode uses ephemeral test passwords and is not for interactive demos. The regular `setup` command runs the same checks with passwords you choose.
 
-Correct password: PASS - Login successful.
-Incorrect password: PASS - Access denied (ERROR 1045).
+## Earlier evidence
 
-The temporary account was deleted after testing it.
-
-### Automatic plugin loading
-Added the ED25519 plugin loading option to docker-compose.yml.
-
-Tested it using a completely new MariaDB container without manually installing the plugin.
-
-PASS - ED25519 was automatically loaded and its status was ACTIVE.
-
-The temporary Docker container was removed after testing.
-
-## Verified TLS
-
-### Secure connection
-Connected using the tls_test account with ED25519 authentication and TLS certificate verification enabled.
-
-PASS - TCP connection established using TLS 1.3. The client reported "cert is OK".
-
-### Unencrypted connection
-Tried connecting with TLS disabled using an account with REQUIRE SSL.
-
-PASS - MariaDB refused the connection.
-
-### Incorrect certificate fingerprint
-Tried connecting with an invalid certificate fingerprint.
-
-PASS - Connection rejected with ERROR 2026: Fingerprint validation of peer certificate failed.
-
-The temporary tls_test account was deleted after testing.
-
-## Additional Security Testing
-
-### Automated security tests
-Created run-tests.sh to automatically check ED25519 and TLS.
-
-The script checks if MariaDB is running, verifies that ED25519 is active, tests a TLS connection and checks that an incorrect certificate fingerprint is rejected.
-
-PASS - All automated checks completed successfully.
-
-### Temporary account testing
-The script creates a temporary account using ED25519 and REQUIRE SSL.
-
-Secure login: PASS - Connection accepted.
-Unencrypted connection: PASS - Connection rejected.
-
-### Automatic cleanup
-The script removes the temporary account after testing.
-
-The account deletion was also checked directly in MariaDB during testing.
-
-## Final Integration
-
-Status: Waiting
-
-Once the hospital database and application are ready, we will test ED25519 authentication and verified TLS using the final application's database connector.
-
-We will also add security tests for the hospital roles and permissions.
+The [previous results page](https://github.com/Gar1tt/The-best-DB-project/blob/ff3971d1591df1d4b47410e047ee70cf7e989e78/security/results.md) covers the earlier MariaDB 13.1.1 native-client checks. The existing screenshots show the original permission model, not the current one.

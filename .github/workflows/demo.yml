@@ -1,0 +1,33 @@
+name: Fresh hospital demo
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      HOSPITAL_DB_PORT: "33306"
+      COMPOSE_PROJECT_NAME: hospital-ci
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Bootstrap empty demo and verify the app
+        run: python3 security/demo.py setup --automated
+      - name: Print database logs on failure
+        if: failure()
+        run: |
+          if [ -f .env ]; then
+            docker compose -f docker-compose.yml -f app/compose.tls.yml logs --no-color db
+          fi
+      - name: Remove disposable CI database
+        if: always()
+        run: |
+          if [ -f .env ]; then
+            docker compose -f docker-compose.yml -f app/compose.tls.yml down --volumes
+          fi
