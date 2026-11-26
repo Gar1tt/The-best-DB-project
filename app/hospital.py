@@ -32,7 +32,7 @@ DENIED = (1044, 1142, 1143)
 # The doors: table or view and what is behind it.
 DOORS = [
     ("patients", "patient register with insurance numbers"),
-    ("patient_contact", "patient contact view; no insurance numbers"),
+    ("patient_contact", "patient contact view; some columns depend on role"),
     ("medical_records", "diagnoses and notes"),
     ("appointments", "appointments"),
     ("staff", "staff records with e-mail and hire date"),
@@ -40,7 +40,9 @@ DOORS = [
     ("departments", "departments"),
     ("roles", "job roles"),
     ("accounts", "staff logins"),
-    ("audit_log", "login history"),
+    ("staff_login_directory", "staff login summary; no password hashes"),
+    ("audit_log", "seeded login history"),
+    ("hospital_audit.events", "live log of supported app writes"),
 ]
 
 class Session:
@@ -107,7 +109,8 @@ def read_keycard(session):
     for name, description in DOORS:
         try:
             # Object names are fixed above; no user input is used as an identifier.
-            session.query(f"SELECT 1 FROM `{name}` LIMIT 0")
+            components = ".".join(f"`{part}`" for part in name.split("."))
+            session.query(f"SELECT 1 FROM {components} LIMIT 0")
         except pymysql.MySQLError as error:
             if error.args[0] not in DENIED:
                 raise
@@ -119,13 +122,13 @@ def read_keycard(session):
 
 def keycard(session):
     print("  KEYCARD of %s, role %s" % (session.account, session.role))
-    print("  Read access checked by MariaDB just now; no rows retrieved.\n")
+    print("  Object read access checked live; OPEN does not guarantee every column.\n")
     table(["door", "read access", "behind it"], read_keycard(session))
 
 
 # ---------------------------------------------------------------- doors
 
-PATIENT_COLUMNS = ["patient_id", "first_name", "last_name", "birth_date", "phone", "address"]
+PATIENT_COLUMNS = ["patient_id", "first_name", "last_name", "phone"]
 
 
 def search_patients(session, text):
@@ -221,7 +224,14 @@ def login_history(session):
 def staff_logins(session):
     headers, rows, _ = session.query(
         "SELECT account_id, staff_id, username, is_active, last_login "
-        "FROM accounts ORDER BY account_id LIMIT 10")
+        "FROM staff_login_directory ORDER BY account_id LIMIT 10")
+    table(headers, rows)
+
+
+def live_audit(session):
+    headers, rows, _ = session.query(
+        "SELECT event_id, occurred_at, actor, action_name, object_id "
+        "FROM hospital_audit.events ORDER BY event_id DESC LIMIT 10")
     table(headers, rows)
 
 
@@ -242,9 +252,10 @@ MENU = [
     ("Book an appointment", book_appointment),
     ("Change a patient's phone number", change_phone),
     ("Staff directory", staff_directory),
-    ("Login history (audit log)", login_history),
-    ("Staff logins (accounts)", staff_logins),
+    ("Login history (seeded data)", login_history),
+    ("Staff login directory", staff_logins),
     ("Connection details", connection_details),
+    ("Live audit history (app writes)", live_audit),
 ]
 COMMANDS = {"keycard": keycard, "connection": connection_details}
 
