@@ -11,11 +11,14 @@
 
 set -o pipefail
 
+# Use the normal database unless a test container is specified.
+CONTAINER="${HOSPITAL_DB_CONTAINER:-hospital-db}"
+
 echo "Starting security tests..."
 echo ""
 
 # First, check if our MariaDB container is running.
-if ! docker ps --format '{{.Names}}' | grep -qx "hospital-db"; then
+if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
     echo "FAIL: MariaDB is not running."
     exit 1
 fi
@@ -26,7 +29,7 @@ echo "PASS: MariaDB is running."
 echo "Checking ED25519..."
 echo "MariaDB root password:"
 
-if docker exec -it hospital-db mariadb -u root -p \
+if docker exec -it "$CONTAINER" mariadb -u root -p \
     --batch --skip-column-names \
     -e "SELECT PLUGIN_STATUS FROM information_schema.PLUGINS WHERE PLUGIN_NAME = 'ed25519';" \
     | tr -d '\r' | grep -qx "ACTIVE"; then
@@ -42,7 +45,7 @@ echo "Checking TLS connection..."
 echo "MariaDB root password:"
 
 # Connect through TCP and require server certificate verification.
-tls_version=$(docker exec -it hospital-db mariadb \
+tls_version=$(docker exec -it "$CONTAINER" mariadb \
     --protocol=TCP \
     --host=127.0.0.1 \
     --ssl-verify-server-cert \
@@ -65,7 +68,7 @@ echo "MariaDB root password:"
 
 # Try connecting with an incorrect certificate fingerprint.
 # The connection should fail even with the correct password.
-result=$(docker exec -it hospital-db mariadb \
+result=$(docker exec -it "$CONTAINER" mariadb \
     --protocol=TCP \
     --host=127.0.0.1 \
     --ssl-verify-server-cert \
@@ -88,11 +91,36 @@ echo "Testing TLS restrictions..."
 
 # Create a temporary account with a random password.
 test_password=$(openssl rand -hex 16)
+ACCOUNT_CREATED=0
+
+# Register cleanup before creating the temporary test account.
+cleanup() {
+    local exit_status=$?
+
+    # Prevent the EXIT trap from running again.
+    trap - EXIT
+
+    if [[ "$ACCOUNT_CREATED" -eq 1 ]]; then
+        echo "Removing temporary test account..."
+
+        if docker exec -it "$CONTAINER" mariadb -u root -p \
+            -e "DROP USER IF EXISTS 'security_auto_test'@'127.0.0.1';"; then
+            echo "PASS: Temporary test account removed."
+        else
+            echo "FAIL: Could not remove temporary test account."
+            exit_status=1
+        fi
+    fi
+
+    exit "$exit_status"
+}
+
+trap cleanup EXIT
 
 echo "Creating temporary test account..."
 echo "Enter your MariaDB root password:"
 
-if ! docker exec -it hospital-db mariadb -u root -p \
+if ! docker exec -it "$CONTAINER" mariadb -u root -p \
     -e "CREATE USER 'security_auto_test'@'127.0.0.1'
         IDENTIFIED VIA ed25519
         USING PASSWORD('$test_password')
@@ -101,13 +129,14 @@ if ! docker exec -it hospital-db mariadb -u root -p \
     exit 1
 fi
 
+ACCOUNT_CREATED=1
 echo "PASS: Temporary account created."
 
 # Check that the temporary account actually requires TLS.
 echo "Checking the test account's TLS requirement..."
 echo "MariaDB root password:"
 
-account_settings=$(docker exec -it hospital-db mariadb -u root -p \
+account_settings=$(docker exec -it "$CONTAINER" mariadb -u root -p \
     --batch --skip-column-names \
     -e "SHOW CREATE USER 'security_auto_test'@'127.0.0.1';")
 
@@ -118,22 +147,8 @@ else
     exit 1
 fi
 
-# Remove the temporary account after testing.
-cleanup() {
-    echo "Removing temporary test account..."
-
-    if docker exec -it hospital-db mariadb -u root -p \
-        -e "DROP USER IF EXISTS 'security_auto_test'@'127.0.0.1';"; then
-        echo "PASS: Temporary test account removed."
-    else
-        echo "FAIL: Could not remove temporary test account."
-        return 1
-    fi
-}
-trap cleanup EXIT
-
 # First check that the account can connect with TLS.
-if docker exec -e MYSQL_PWD="$test_password" hospital-db \
+if docker exec -e MYSQL_PWD="$test_password" "$CONTAINER" \
     mariadb --protocol=TCP --host=127.0.0.1 \
     --ssl-verify-server-cert \
     -u security_auto_test -e "SELECT 1;" > /dev/null 2>&1; then
@@ -145,7 +160,7 @@ fi
 
 # Try connecting without TLS.
 # The account requires SSL, so MariaDB should reject it.
-error_output=$(docker exec -e MYSQL_PWD="$test_password" hospital-db \
+error_output=$(docker exec -e MYSQL_PWD="$test_password" "$CONTAINER" \
     mariadb --protocol=TCP --host=127.0.0.1 \
     --disable-ssl \
     -u security_auto_test -e "SELECT 1;" 2>&1)
