@@ -7,7 +7,7 @@ set -euo pipefail
 # Tests authentication, TLS and role permissions.
 # All SQL checks are read-only.
 
-CONTAINER="hospital-db"
+CONTAINER="${HOSPITAL_DB_CONTAINER:-hospital-db}"
 PASSED=0
 FAILED=0
 

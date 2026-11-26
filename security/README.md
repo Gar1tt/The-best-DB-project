@@ -16,7 +16,7 @@ Before running the security setup, make sure you have:
 - Docker Desktop installed and running.
 - The `hospital-db` container running.
 - The hospital database and its tables imported.
-- The database roles and test accounts created using `../database/02_roles_grants.sql`.
+- The database roles and test accounts created using `database/02_roles_grants.sql`.
 
 The Docker configuration loads the ED25519 authentication plugin.
 
@@ -41,7 +41,7 @@ Both the `localhost` and `%` account definitions are configured.
 
 The script only updates authentication and SSL requirements. Existing roles and permissions remain unchanged.
 
-**Note:** Run this script after `../database/02_roles_grants.sql`, since that file creates the test accounts.
+**Note:** Run this script after `database/02_roles_grants.sql`, since that file creates the test accounts.
 
 ## 3. Running the Security Tests
 
@@ -90,9 +90,9 @@ Each account has different permissions depending on its role.
 
 For example, doctors can read and update medical records, while nurses can read those records but cannot modify them.
 
-Receptionists can access patient contact information through a restricted view, while administrators have full access to the hospital database.
+Receptionists can access patient contact information through a restricted view, while administrators have broad database privileges with explicit restrictions protecting the audit log.
 
-The permissions are defined in `../database/02_roles_grants.sql`.
+The permissions are defined in `database/02_roles_grants.sql`.
 
 ## 5. Test Results
 
@@ -112,9 +112,9 @@ All eight account definitions (`localhost` and `%` for each user) were confirmed
 
 This setup is intended for the university project and uses demonstration accounts with generated hospital data.
 
-The setup script asks for passwords instead of storing them directly in the script. However, it currently passes the root password through a temporary Docker environment variable and builds SQL statements from validated password inputs. These choices are acceptable for a controlled demonstration but would require stronger credential handling in a production environment.
+The setup script prompts for passwords instead of storing them in the repository. The MariaDB root password is passed through a temporary client configuration file with restricted permissions, which is removed after execution. Demo account passwords are still inserted into generated SQL statements after character validation.
 
-To reset the test accounts, run `../database/02_roles_grants.sql` again, followed by `security/setup-hospital-users.sh`.
+To reset the test accounts, run `database/02_roles_grants.sql` again, followed by `security/setup-hospital-users.sh`.
 
 
 ## 7. Security Verification and Attack Tests
@@ -198,3 +198,15 @@ During local testing on MariaDB 13.1.1, all 19 checks passed with no failures.
 The tests can be repeated using:
 
     bash security/tests/hospital-integration-tests.sh
+
+## Security Hardening and Verification
+
+The authentication setup uses a temporary MariaDB client configuration file with restricted permissions instead of passing the root password through `MYSQL_PWD`. The temporary file is removed after the script exits.
+
+Both security test scripts support the `HOSPITAL_DB_CONTAINER` environment variable for testing against an isolated container.
+
+The original security test runner registers temporary-account cleanup before account creation and preserves failure exit codes. Cleanup was verified during a simulated failure with exit status 42.
+
+A fresh MariaDB 13.1 test environment was used to import the hospital schema and role definitions, configure ED25519 authentication and required TLS for eight account definitions, and run the integration suite. All 19 integration tests passed.
+
+**Remaining limitation:** Demo account passwords are still interpolated into SQL after character validation. This implementation is intended for a local educational environment, not production credential management.
